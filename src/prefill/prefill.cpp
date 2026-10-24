@@ -4193,6 +4193,21 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             for (int32_t e = 0; e < m.g->n_expert; ++e) order[(size_t) e] = e;
                             n_order = 0;   // the routed experts (the debug report): the compact order spans every id
                             for (int32_t e = 0; e < m.g->n_expert; ++e) n_order += m.cnt[(size_t) e] > 0;
+                            // The compact walk reads the routing tables like every other path: the activation
+                            // quantizer scatters each token into its K rows (slot/src) and the combine reads the
+                            // slots back.  The tables were uploaded only in the non-compact branch below, so the
+                            // compact one read them uninitialised: the scatter then wrote to a wild row and the
+                            // request died with "quantize_scatter: an illegal memory access was encountered".
+                            if (grp_mapped) {
+                                copy_i32(m.slot_dev, m.grp_dev + m.grp_tk, T * K, m.cs);
+                                copy_i32(m.src_dev, m.grp_dev + 2 * m.grp_tk, T * K, m.cs);
+                            } else {
+                                if (m.up_ring.h2d(m.slot_dev, m.slot_host.data(), (size_t) T * K * 4, m.cs) != cudaSuccess ||
+                                    m.up_ring.h2d(m.src_dev, m.src_host.data(), (size_t) T * K * 4, m.cs) != cudaSuccess) {
+                                    err = "prefill: the routing tables' upload failed";
+                                    return false;
+                                }
+                            }
                         } else {
                         for (int32_t e = 0; e < m.g->n_expert; ++e)
                             if (m.cnt[(size_t) e] > 0 && (on_peer.empty() || on_peer[(size_t) e] != 2) &&
